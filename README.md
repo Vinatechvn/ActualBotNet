@@ -7,8 +7,8 @@
 4. Stores Bots in SQL Database<br>
 5. DDoS<br>
 6. Keylogging<br>
-7. MITM<br>
-8. Auto Spreading<br>
+7. Auto Spreading<br>
 
 <b>Upcoming Features:</b><br>
-5. Auto Update (Github based)
+1. MITM<br>
+2. Auto Update (Github based)
